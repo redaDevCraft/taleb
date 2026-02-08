@@ -41,12 +41,15 @@ RUN php artisan config:cache \
 RUN chown -R www-data:www-data storage bootstrap/cache \
     && chmod -R ug+rwx storage bootstrap/cache
 
-# Nginx
+# Nginx config (heredoc - NO indentation on EOF line)
 COPY <<EOF /etc/nginx/conf.d/default.conf
 server {
-    listen ${PORT:-8080};
+    listen 8080;
+    server_name _;
     root /var/www/html/public;
-    index index.php;
+    index index.php index.html;
+
+    client_max_body_size 100M;
 
     location / {
         try_files \$uri \$uri/ /index.php?\$query_string;
@@ -54,5 +57,51 @@ server {
 
     location ~ \.php\$ {
         try_files \$uri =404;
+        fastcgi_split_path_info ^(.+\.php)(/.+)\$;
         fastcgi_pass 127.0.0.1:9000;
-        fastcgi_index
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param PATH_INFO \$fastcgi_path_info;
+        include fastcgi_params;
+    }
+
+    location ~ /\. {
+        deny all;
+    }
+}
+EOF
+
+# Supervisor config (heredoc - NO indentation on EOF line)
+COPY <<EOF /etc/supervisor/conf.d/supervisord.conf
+[supervisord]
+nodaemon=true
+user=root
+
+[program:nginx]
+command=nginx -g "daemon off;"
+autostart=true
+autorestart=true
+stderr_logfile=/dev/stderr
+stdout_logfile=/dev/stdout
+stderr_logfile_maxbytes=0
+stdout_logfile_maxbytes=0
+
+[program:php-fpm]
+command=php-fpm -F
+autostart=true
+autorestart=true
+stderr_logfile=/dev/stderr
+stdout_logfile=/dev/stdout
+stderr_logfile_maxbytes=0
+stdout_logfile_maxbytes=0
+EOF
+
+# Create log dirs
+RUN mkdir -p /var/log/nginx /var/log/php-fpm
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8080/ || exit 1
+
+EXPOSE 8080
+
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
