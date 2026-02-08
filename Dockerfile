@@ -28,9 +28,13 @@ RUN composer install --no-dev --no-scripts --optimize-autoloader --prefer-dist
 COPY . .
 RUN composer dump-autoload --optimize
 
-# NPM build
-RUN npm ci --omit=dev --progress=false \
+# NPM: Install ALL deps (dev needed for Vite/Wayfinder build)
+RUN npm ci --progress=false \
     && npm run build
+
+# Cleanup dev deps after build (optional, saves ~100MB)
+RUN npm prune --production \
+    && rm -rf node_modules/.cache /root/.npm
 
 # Laravel optimize
 RUN php artisan config:cache \
@@ -83,8 +87,6 @@ autostart=true
 autorestart=true
 stderr_logfile=/dev/stderr
 stdout_logfile=/dev/stdout
-stderr_logfile_maxbytes=0
-stdout_logfile_maxbytes=0
 
 [program:php-fpm]
 command=php-fpm -F
@@ -92,11 +94,7 @@ autostart=true
 autorestart=true
 stderr_logfile=/dev/stderr
 stdout_logfile=/dev/stdout
-stderr_logfile_maxbytes=0
-stdout_logfile_maxbytes=0
 EOF
-
-RUN mkdir -p /var/log/nginx /var/log/php-fpm
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8080/ || exit 1
