@@ -9,8 +9,12 @@ FROM php:8.4-fpm
 RUN apt-get update && apt-get install -y \
     git curl unzip zip libpng-dev libonig-dev libxml2-dev \
     libzip-dev libfreetype6-dev libjpeg62-turbo-dev libwebp-dev \
-    nodejs npm \
+    nginx supervisor \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 20 (properly)
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs
 
 # ----------------------------
 # Install PHP extensions
@@ -29,20 +33,21 @@ WORKDIR /var/www/html
 RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 
 # ----------------------------
-# Copy composer files and install dependencies
+# Copy composer files and install dependencies (NO SCRIPTS - artisan not present yet)
 # ----------------------------
 COPY composer.json composer.lock ./
-RUN composer install --no-dev --optimize-autoloader --prefer-dist
+RUN composer install --no-dev --no-scripts --optimize-autoloader --prefer-dist
 
 # ----------------------------
-# Copy the rest of the app
+# Copy the rest of the app (includes artisan)
 # ----------------------------
 COPY . .
 
 # ----------------------------
-# Generate optimized autoload
+# Run composer scripts NOW (artisan is available)
 # ----------------------------
-RUN composer dump-autoload --optimize
+RUN composer dump-autoload --optimize \
+    && php artisan package:discover --ansi
 
 # ----------------------------
 # Install Node dependencies and build Vite assets
@@ -57,14 +62,55 @@ RUN chown -R www-data:www-data storage bootstrap/cache \
     && chmod -R ug+rwx storage bootstrap/cache
 
 # ----------------------------
-# Laravel optimize
+# Skip cache during build (no env vars available) - do at runtime
 # ----------------------------
-RUN php artisan config:clear \
-    && php artisan route:clear \
-    && php artisan view:clear \
-    && php artisan config:cache \
-    && php artisan route:cache \
-    && php artisan view:cache
+
+# ----------------------------
+# Nginx config (for production)
+# ----------------------------
+COPY <<EOF /etc/nginx/conf.d/default.conf
+server {
+    listen 8080;
+    server_name _;
+    root /var/www/html/public;
+    index index.php;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        try_files $uri =404;
+        fastcgi_pass 127.0.0.1:9000;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+    }
+
+    location ~ /\. {
+        deny all;
+    }
+}
+EOF
+
+# ----------------------------
+# Supervisor config (Nginx + PHP-FPM)
+# ----------------------------
+COPY <<EOF /etc/supervisor/conf.d/supervisord.conf
+[supervisord]
+nodaemon=true
+user=root
+
+[program:php-fpm]
+command=php-fpm -F
+autostart=true
+autorestart=true
+
+[program:nginx]
+command=nginx -g "daemon off;"
+autostart=true
+autorestart=true
+EOF
 
 # ----------------------------
 # Expose port
@@ -72,6 +118,6 @@ RUN php artisan config:clear \
 EXPOSE 8080
 
 # ----------------------------
-# Run migrations and start Laravel
+# Start services (migrations run at runtime with env vars)
 # ----------------------------
-CMD php artisan migrate --force && php artisan serve --host=0.0.0.0 --port=8080
+CMD php artisan migrate --force && /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
